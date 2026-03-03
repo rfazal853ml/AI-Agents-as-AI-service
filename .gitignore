@@ -1,3 +1,6 @@
 .env
 **/__pycache__/
 **/AI Agents as AI service.docx
+**/node_modules/
+**/.wwebjs_auth/
+**/.wwebjs_cache/
