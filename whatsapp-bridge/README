@@ -1,0 +1,5 @@
+npm init -y
+
+npm install whatsapp-web.js qrcode-terminal axios
+
+node bridge.js
