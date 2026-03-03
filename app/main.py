@@ -5,6 +5,7 @@ from app.database import init_db
 from app.vector_store import search
 from app.prompt import build_prompt
 from app.llm import generate_response
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -12,9 +13,36 @@ init_db()
 
 conversation_memory = {}
 
+class ChatRequest(BaseModel):
+    user_id: str
+    message: str
+
+
+@app.post("/chat")
+def chat_endpoint(req: ChatRequest):
+    user_message = req.message
+    user_id = req.user_id
+
+    products = search(user_message)
+    history = conversation_memory.get(user_id, [])
+    messages = build_prompt(user_message, products, history)
+    ai_response = generate_response(messages)
+
+    conversation_memory[user_id] = history + [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": ai_response}
+    ]
+
+    print(conversation_memory)
+    print("AI response for user:", ai_response)
+
+    return {"response": ai_response}
+
+
 @app.get("/")
 async def root():
     return {"message": "AI Agents As A Service is running!"}
+
 
 @app.post("/webhook")
 async def whatsapp_webhook(
