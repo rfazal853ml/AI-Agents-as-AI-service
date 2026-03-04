@@ -101,7 +101,6 @@ def checkout_summary(session: dict) -> dict:
         f"━━━━━━━━━━━━━━━━\n"
         f"To confirm, type *pay* ✅\n"
         f"To go back, type *cart* 🛒\n\n"
-        f"_(This is a demo — no real charge will occur)_ 🔒"
     )}
 
 
