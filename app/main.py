@@ -7,7 +7,7 @@ from typing import Optional
 
 from app.database import init_db, SessionLocal, Product, get_system_prompt, set_system_prompt
 from app.vector_store import search, boot_index, index_add, index_remove, index_update
-from app.prompt import build_prompt
+from app.prompt import build_prompt, build_intro_prompt
 from app.llm import generate_response
 from app.session import get_session, cart_add, cart_clear, history_append
 from app import responses as R
@@ -22,7 +22,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Startup: create DB tables + load FAISS index ──────────────
+# ── Startup ───────────────────────────────────────────────────
 init_db()
 boot_index()
 
@@ -43,10 +43,12 @@ def chat_endpoint(req: ChatRequest):
     session = get_session(req.user_id)
     cmd     = req.message.strip().lower()
 
+    # ── 1. First-time greeting ────────────────────────────────
     if not session["greeted"]:
         session["greeted"] = True
         return R.greeting()
 
+    # ── 2. Command routing ────────────────────────────────────
     if cmd == "menu":
         return R.product_catalog()
 
@@ -73,13 +75,21 @@ def chat_endpoint(req: ChatRequest):
         cart_clear(session)
         return R.cart_cleared()
 
-    # ── AI fallback ───────────────────────────────────────────
+    # ── 3. Semantic search ────────────────────────────────────
     products = search(req.message)
-    messages = build_prompt(req.message, products, session["history"])
-    ai_reply = generate_response(messages)
-    history_append(session, req.message, ai_reply)
 
-    return {"text": ai_reply}
+    if products:
+        # Products found → generate a short AI intro + rich product cards
+        intro_messages = build_intro_prompt(req.message, products)
+        ai_intro       = generate_response(intro_messages)
+        history_append(session, req.message, ai_intro)
+        return R.search_results(products, ai_intro)
+    else:
+        # No products found → pure conversational AI reply
+        messages = build_prompt(req.message, [], session["history"])
+        ai_reply = generate_response(messages)
+        history_append(session, req.message, ai_reply)
+        return {"text": ai_reply}
 
 
 # ── WhatsApp webhook (Twilio) ─────────────────────────────────
@@ -91,18 +101,33 @@ async def whatsapp_webhook(
     user_message = Body
     user_id      = From
 
-    products    = search(user_message)
-    history     = conversation_memory.get(user_id, [])
-    messages    = build_prompt(user_message, products, history)
-    ai_response = generate_response(messages)
+    products = search(user_message)
+    history  = conversation_memory.get(user_id, [])
 
-    conversation_memory[user_id] = history + [
-        {"role": "user",      "content": user_message},
-        {"role": "assistant", "content": ai_response},
-    ]
+    if products:
+        intro_messages = build_intro_prompt(user_message, products)
+        ai_intro       = generate_response(intro_messages)
+        conversation_memory[user_id] = history + [
+            {"role": "user",      "content": user_message},
+            {"role": "assistant", "content": ai_intro},
+        ]
+        # Webhook is Twilio — can only send one message, so flatten to text
+        lines = [ai_intro]
+        for p in products:
+            lines.append(f"\n*{p.name}* — ${p.price:.2f}\n{p.description}\nReply *buy {p.id}* to add to cart")
+        lines.append("\nType *cart* to view your basket 🛒")
+        resp = MessagingResponse()
+        resp.message("\n".join(lines))
+    else:
+        messages    = build_prompt(user_message, [], history)
+        ai_response = generate_response(messages)
+        conversation_memory[user_id] = history + [
+            {"role": "user",      "content": user_message},
+            {"role": "assistant", "content": ai_response},
+        ]
+        resp = MessagingResponse()
+        resp.message(ai_response)
 
-    resp = MessagingResponse()
-    resp.message(ai_response)
     return PlainTextResponse(str(resp), media_type="application/xml")
 
 
@@ -141,7 +166,6 @@ def admin_get_products():
 
 @app.post("/admin/products", status_code=201)
 def admin_create_product(data: ProductIn):
-    # 1. Save to DB
     db = SessionLocal()
     p  = Product(
         name        = data.name,
@@ -153,16 +177,12 @@ def admin_create_product(data: ProductIn):
     db.commit()
     db.refresh(p)
     db.close()
-
-    # 2. Add to live FAISS index instantly
     index_add(p)
-
     return {"id": p.id, "name": p.name}
 
 
 @app.put("/admin/products/{product_id}")
 def admin_update_product(product_id: int, data: ProductIn):
-    # 1. Update DB
     db = SessionLocal()
     p  = db.query(Product).filter(Product.id == product_id).first()
     if not p:
@@ -175,16 +195,12 @@ def admin_update_product(product_id: int, data: ProductIn):
     db.commit()
     db.refresh(p)
     db.close()
-
-    # 2. Re-embed and update live FAISS index
     index_update(p)
-
     return {"ok": True}
 
 
 @app.delete("/admin/products/{product_id}")
 def admin_delete_product(product_id: int):
-    # 1. Delete from DB
     db = SessionLocal()
     p  = db.query(Product).filter(Product.id == product_id).first()
     if not p:
@@ -193,10 +209,7 @@ def admin_delete_product(product_id: int):
     db.delete(p)
     db.commit()
     db.close()
-
-    # 2. Remove from live FAISS index
     index_remove(product_id)
-
     return {"ok": True}
 
 

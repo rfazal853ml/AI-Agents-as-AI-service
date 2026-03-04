@@ -1,9 +1,4 @@
 # app/responses.py
-# Every function returns a dict that main.py sends back to bridge.js
-# Shape:
-#   { "text": str }                        — plain text reply
-#   { "text": str, "image_url": str }      — single image + caption
-#   { "messages": [ {text, image_url?} ] } — multiple messages (one per product)
 
 import random, string
 from datetime import datetime
@@ -15,7 +10,7 @@ from app.session   import cart_summary_text, cart_total, cart_clear
 
 def greeting() -> dict:
     return {"text": (
-        "👋 *Welcome to AI Store!*\n\n"
+        "👋 *Welcome to Wizbay!*\n\n"
         "I'm your personal shopping assistant 🤖\n\n"
         "Here's what you can do:\n"
         "🛍️ *menu*      — browse all products\n"
@@ -26,7 +21,7 @@ def greeting() -> dict:
     )}
 
 
-# ── Product catalog ───────────────────────────────────────────
+# ── Full product catalog (menu command) ───────────────────────
 
 def product_catalog() -> dict:
     db = SessionLocal()
@@ -37,11 +32,8 @@ def product_catalog() -> dict:
         return {"text": "😔 No products available right now. Check back soon!"}
 
     msgs = []
-
-    # Header message
     msgs.append({"text": "🛍️ *Our Products*\nHere's what we have for you today:\n"})
 
-    # One message per product (image + caption)
     for p in products:
         caption = (
             f"*{p.name}*\n"
@@ -51,9 +43,39 @@ def product_catalog() -> dict:
         )
         msgs.append({"text": caption, "image_url": p.image_url})
 
-    # Footer
     msgs.append({"text": "Type *cart* to view your basket 🛒"})
+    return {"messages": msgs}
 
+
+# ── Search results (AI similarity match) ─────────────────────
+
+def search_results(products, ai_intro: str = None) -> dict:
+    """
+    Rich product cards returned after a semantic search.
+    Optionally prepend a short AI-generated intro line.
+    """
+    if not products:
+        return {"text": (
+            "😔 I couldn't find anything matching that.\n\n"
+            "Type *menu* to browse all products or try a different search!"
+        )}
+
+    msgs = []
+
+    # Intro — use AI intro if provided, else a default
+    intro = ai_intro if ai_intro else "🔍 *Here's what I found for you:*"
+    msgs.append({"text": intro})
+
+    for p in products:
+        caption = (
+            f"*{p.name}*\n"
+            f"💰 *${p.price:.2f}*\n\n"
+            f"{p.description}\n\n"
+            f"➡️ Reply *buy {p.id}* to add to cart"
+        )
+        msgs.append({"text": caption, "image_url": p.image_url})
+
+    msgs.append({"text": "Type *cart* to view your basket 🛒"})
     return {"messages": msgs}
 
 
@@ -101,14 +123,15 @@ def checkout_summary(session: dict) -> dict:
         f"━━━━━━━━━━━━━━━━\n"
         f"To confirm, type *pay* ✅\n"
         f"To go back, type *cart* 🛒\n\n"
+        f"_(This is a demo — no real charge will occur)_ 🔒"
     )}
 
 
 # ── Mock payment ──────────────────────────────────────────────
 
 def _order_id() -> str:
-    date  = datetime.now().strftime("%Y%m%d")
-    rand  = "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
+    date = datetime.now().strftime("%Y%m%d")
+    rand = "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
     return f"ORD-{date}-{rand}"
 
 
@@ -143,7 +166,7 @@ def cart_cleared() -> dict:
     return {"text": "🗑️ Your cart has been cleared.\nType *menu* to start shopping again!"}
 
 
-# ── Unknown command hint ──────────────────────────────────────
+# ── Unknown command ───────────────────────────────────────────
 
 def unknown_command_hint() -> dict:
     return {"text": (

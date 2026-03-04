@@ -1,22 +1,28 @@
 import faiss
 import numpy as np
-import os
 from app.database import SessionLocal, Product
 from app.llm import get_embedding
 
 # ── In-memory state ───────────────────────────────────────────
-_index    = None   # faiss.IndexFlatL2
-_meta     = []     # list of product_ids, parallel to index vectors
+_index = None   # faiss.IndexFlatL2
+_meta  = []     # list of product_ids, parallel to index vectors
 
+# ── Distance threshold ────────────────────────────────────────
+# IndexFlatL2 uses squared Euclidean distance.
+# Lower = more similar. Tune this value:
+#   < 0.3  → very strict (only near-exact matches)
+#   < 0.5  → balanced (recommended)
+#   < 0.8  → loose (more results, less relevant)
+DISTANCE_THRESHOLD = 0.5
 
-# ── Boot: build index from DB if not already loaded ───────────
 
 def _build_text(product) -> str:
     return f"{product.name} {product.description or ''}"
 
 
+# ── Boot: build index from DB on startup ──────────────────────
+
 def boot_index():
-    """Called once on startup. Loads all products from DB into FAISS."""
     global _index, _meta
 
     db       = SessionLocal()
@@ -24,7 +30,6 @@ def boot_index():
     db.close()
 
     if not products:
-        # Empty store — create a blank index (dimension fixed at first embed)
         _index = None
         _meta  = []
         print("⚠️  No products in DB — FAISS index is empty.")
@@ -37,8 +42,8 @@ def boot_index():
         vectors.append(emb)
         meta.append(p.id)
 
-    dim    = len(vectors[0])
-    index  = faiss.IndexFlatL2(dim)
+    dim   = len(vectors[0])
+    index = faiss.IndexFlatL2(dim)
     index.add(np.array(vectors, dtype="float32"))
 
     _index = index
@@ -46,28 +51,23 @@ def boot_index():
     print(f"✅ FAISS index ready — {len(meta)} product(s) loaded.")
 
 
-# ── Add a single product to the live index ────────────────────
+# ── Add a single product ──────────────────────────────────────
 
 def index_add(product):
-    """Insert one product into the in-memory FAISS index."""
     global _index, _meta
 
     emb = np.array([get_embedding(_build_text(product))], dtype="float32")
 
     if _index is None:
-        dim    = emb.shape[1]
-        _index = faiss.IndexFlatL2(dim)
+        _index = faiss.IndexFlatL2(emb.shape[1])
 
     _index.add(emb)
     _meta.append(product.id)
 
 
-# ── Remove a product from the live index ─────────────────────
-# FAISS IndexFlatL2 doesn't support deletion, so we rebuild
-# only the affected rows (fast for small catalogs).
+# ── Remove a single product (rebuild without it) ──────────────
 
 def index_remove(product_id: int):
-    """Remove one product and rebuild the index without it."""
     global _index, _meta
 
     if product_id not in _meta:
@@ -97,28 +97,40 @@ def index_remove(product_id: int):
     _meta  = meta
 
 
-# ── Update = remove old vector + add new one ─────────────────
+# ── Update = remove + re-add ──────────────────────────────────
 
 def index_update(product):
-    """Re-embed a product after an edit."""
     index_remove(product.id)
     index_add(product)
 
 
-# ── Semantic search ───────────────────────────────────────────
+# ── Semantic search with distance filtering ───────────────────
 
 def search(query: str, k: int = 3):
-    """Return up to k most relevant Product objects for a query."""
+    """
+    Return only products whose distance is below DISTANCE_THRESHOLD.
+    This prevents unrelated products from showing up just because
+    they are the 'closest available' vectors.
+    """
     if _index is None or len(_meta) == 0:
         return []
 
-    k   = min(k, len(_meta))   # can't return more than we have
-    qv  = np.array([get_embedding(query)], dtype="float32")
-    _, indices = _index.search(qv, k)
+    k  = min(k, len(_meta))
+    qv = np.array([get_embedding(query)], dtype="float32")
 
-    product_ids = [_meta[i] for i in indices[0] if i < len(_meta)]
+    distances, indices = _index.search(qv, k)
+
+    matched_ids = []
+    for dist, idx in zip(distances[0], indices[0]):
+        if idx == -1:
+            continue
+        if dist <= DISTANCE_THRESHOLD:
+            matched_ids.append(_meta[idx])
+
+    if not matched_ids:
+        return []
 
     db       = SessionLocal()
-    products = db.query(Product).filter(Product.id.in_(product_ids)).all()
+    products = db.query(Product).filter(Product.id.in_(matched_ids)).all()
     db.close()
     return products
