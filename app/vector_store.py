@@ -1,46 +1,124 @@
 import faiss
 import numpy as np
-import pickle
+import os
 from app.database import SessionLocal, Product
 from app.llm import get_embedding
 
-INDEX_FILE = "faiss.index"
-META_FILE = "faiss_meta.pkl"
+# ── In-memory state ───────────────────────────────────────────
+_index    = None   # faiss.IndexFlatL2
+_meta     = []     # list of product_ids, parallel to index vectors
 
 
-def build_index():
-    db = SessionLocal()
+# ── Boot: build index from DB if not already loaded ───────────
+
+def _build_text(product) -> str:
+    return f"{product.name} {product.description or ''}"
+
+
+def boot_index():
+    """Called once on startup. Loads all products from DB into FAISS."""
+    global _index, _meta
+
+    db       = SessionLocal()
     products = db.query(Product).all()
+    db.close()
+
+    if not products:
+        # Empty store — create a blank index (dimension fixed at first embed)
+        _index = None
+        _meta  = []
+        print("⚠️  No products in DB — FAISS index is empty.")
+        return
 
     vectors = []
-    metadata = []
+    meta    = []
+    for p in products:
+        emb = get_embedding(_build_text(p))
+        vectors.append(emb)
+        meta.append(p.id)
 
-    for product in products:
-        text = f"{product.name} {product.description}"
-        embedding = get_embedding(text)
-        vectors.append(embedding)
-        metadata.append(product.id)
+    dim    = len(vectors[0])
+    index  = faiss.IndexFlatL2(dim)
+    index.add(np.array(vectors, dtype="float32"))
 
-    dimension = len(vectors[0])
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(vectors).astype("float32"))
-
-    faiss.write_index(index, INDEX_FILE)
-
-    with open(META_FILE, "wb") as f:
-        pickle.dump(metadata, f)
+    _index = index
+    _meta  = meta
+    print(f"✅ FAISS index ready — {len(meta)} product(s) loaded.")
 
 
-def search(query, k=3):
-    index = faiss.read_index(INDEX_FILE)
+# ── Add a single product to the live index ────────────────────
 
-    with open(META_FILE, "rb") as f:
-        metadata = pickle.load(f)
+def index_add(product):
+    """Insert one product into the in-memory FAISS index."""
+    global _index, _meta
 
-    query_vector = np.array([get_embedding(query)]).astype("float32")
-    distances, indices = index.search(query_vector, k)
+    emb = np.array([get_embedding(_build_text(product))], dtype="float32")
 
-    product_ids = [metadata[i] for i in indices[0]]
+    if _index is None:
+        dim    = emb.shape[1]
+        _index = faiss.IndexFlatL2(dim)
 
-    db = SessionLocal()
-    return db.query(Product).filter(Product.id.in_(product_ids)).all()
+    _index.add(emb)
+    _meta.append(product.id)
+
+
+# ── Remove a product from the live index ─────────────────────
+# FAISS IndexFlatL2 doesn't support deletion, so we rebuild
+# only the affected rows (fast for small catalogs).
+
+def index_remove(product_id: int):
+    """Remove one product and rebuild the index without it."""
+    global _index, _meta
+
+    if product_id not in _meta:
+        return
+
+    db       = SessionLocal()
+    products = db.query(Product).filter(Product.id != product_id).all()
+    db.close()
+
+    if not products:
+        _index = None
+        _meta  = []
+        return
+
+    vectors = []
+    meta    = []
+    for p in products:
+        emb = get_embedding(_build_text(p))
+        vectors.append(emb)
+        meta.append(p.id)
+
+    dim   = len(vectors[0])
+    index = faiss.IndexFlatL2(dim)
+    index.add(np.array(vectors, dtype="float32"))
+
+    _index = index
+    _meta  = meta
+
+
+# ── Update = remove old vector + add new one ─────────────────
+
+def index_update(product):
+    """Re-embed a product after an edit."""
+    index_remove(product.id)
+    index_add(product)
+
+
+# ── Semantic search ───────────────────────────────────────────
+
+def search(query: str, k: int = 3):
+    """Return up to k most relevant Product objects for a query."""
+    if _index is None or len(_meta) == 0:
+        return []
+
+    k   = min(k, len(_meta))   # can't return more than we have
+    qv  = np.array([get_embedding(query)], dtype="float32")
+    _, indices = _index.search(qv, k)
+
+    product_ids = [_meta[i] for i in indices[0] if i < len(_meta)]
+
+    db       = SessionLocal()
+    products = db.query(Product).filter(Product.id.in_(product_ids)).all()
+    db.close()
+    return products

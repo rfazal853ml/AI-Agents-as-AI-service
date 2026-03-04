@@ -1,3 +1,6 @@
+from app.database import get_system_prompt
+
+
 def build_prompt(user_message, products, history=None):
     if products:
         product_text = "\n".join([
@@ -7,27 +10,16 @@ def build_prompt(user_message, products, history=None):
     else:
         product_text = "No products found matching your query."
 
+    # Always fetch the latest prompt from DB so changes take effect immediately
+    system_content = get_system_prompt()
+
+    # Inject the available products into the prompt
+    system_content += f"\n\nAvailable Products:\n{product_text}"
+
     messages = [
         {
             "role": "system",
-            "content": f"""
-You are a friendly WhatsApp sales assistant.
-Use only the provided products to answer clearly and in a friendly way.
-Respond using bullet points and emojis
-where appropriate. Keep it concise and helpful.
-keep in mind whatsapp formatting and character limits.
-Ensure WhatsApp text formatting rules while responding:
-- Use single asterisks * for bold like *bold*.
-- Use underscores _ for italics like _italics_.
-- Use tildes ~ for strikethrough like ~strikethrough~.
-- Use triple backticks ``` for monospace like ```code```.
-
-
-Available Products:
-{product_text}
-
-Be concise, persuasive, and helpful.
-"""
+            "content": system_content,
         }
     ]
 
