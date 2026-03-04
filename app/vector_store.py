@@ -13,7 +13,7 @@ _meta  = []     # list of product_ids, parallel to index vectors
 #   < 0.3  → very strict (only near-exact matches)
 #   < 0.5  → balanced (recommended)
 #   < 0.8  → loose (more results, less relevant)
-DISTANCE_THRESHOLD = 0.5
+DISTANCE_THRESHOLD = 0.6
 
 
 def _build_text(product) -> str:
